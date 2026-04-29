@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+*.egg-info/
+dist/
+build/
+results.tsv
+npn_database.json
+*.png
+.venv/
+venv/
