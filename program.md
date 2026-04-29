@@ -18,15 +18,30 @@
 8. ABC read_truth synthesis (per-output)
 9. ABC polish (resyn2/resyn2rs/resyn2rs_x2/compress2/dc2/dch_resyn, independent + iterative)
 
-## Known Floors (confirmed via exhaustive testing)
-- xor3: 6 gates is optimal in AIG (not 4 as previously assumed)
-- parity8: 21 gates is optimal (balanced XOR tree, ABC confirms)
-- full_adder: 7 gates is optimal
-- add2: 10 gates is optimal (CLA structure)
-- add4: 24 gates (CLA + ABC floor)
-- add8: 52 gates (CLA + ABC floor)
-- mul4x4: 83 gates (array multiplier + resyn2rs floor)
-- mul3x3: 37 gates (array multiplier + ABC floor)
+## Known Floors (confirmed via SAT proofs and exhaustive testing)
+### Proven optimal via multi-output SAT exact synthesis:
+- and3: 2 gates (trivial)
+- or3: 2 gates (trivial)
+- mul2x1: 2 gates (trivial)
+- half_adder: 3 gates (XOR + AND sharing)
+- mux2: 3 gates
+- maj3: 4 gates (SAT-proved, no 3-gate solution exists)
+- cmp2: 5 gates (SAT-proved)
+- priority4: 5 gates (SAT-proved, 4-gate UNSAT)
+- xor3: 6 gates (SAT-proved, not 4 as previously assumed)
+- full_adder: 7 gates (SAT-proved multi-output, 6-gate UNSAT)
+- mul2x2: 8 gates (SAT-proved multi-output, 7-gate UNSAT)
+- add2: 10 gates (SAT-proved multi-output, 9-gate UNSAT)
+- decode3to8: 12 gates (structural argument: 4 shared pairs + 8 outputs)
+- parity8: 21 gates (balanced XOR tree, ABC confirms)
+
+### ABC optimization floors (not proven optimal, but no algorithm finds better):
+- add4: 24 gates (CLA + ABC, multiple starting topologies converge)
+- add8: 52 gates (CLA + ABC, Brent-Kung also converges to 52)
+- mul3x3: 37 gates (array multiplier + ABC)
+- mul4x4: 83 gates (array multiplier + resyn2rs, 50 random topologies tested)
+- cmp4: 13 gates (ABC from multiple starting points)
+- cmp8: 29 gates (ABC from multiple starting points)
 
 ## Priorities
 1. Multi-output SAT-based exact synthesis (shared gates across outputs)
