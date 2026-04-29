@@ -778,19 +778,18 @@ def _exact_multi_output(tt: TruthTable, max_gates: Optional[int] = None) -> Opti
 # ---------------------------------------------------------------------------
 
 def aig_rewrite(circuit: Circuit) -> Circuit:
-    """Apply basic AIG rewriting passes for cleanup."""
-    # For now, just rebuild with structural hashing
+    """Apply basic AIG rewriting passes for cleanup via structural hashing rebuild."""
     tt = circuit.to_truth_table()
     n = tt.n_inputs
-
     if n > 16:
         return circuit
 
     builder = AIGBuilder(n)
     outputs = []
+    cache = {}
     for j in range(tt.n_outputs):
         single_tt = TruthTable(n, 1, (tt.table[j],))
-        lit = _shannon_rec(single_tt, 0, list(range(n)), builder, {})
+        lit = _shannon_rec(single_tt, list(range(n)), builder, cache)
         outputs.append(lit)
 
     rewritten = builder.build(outputs)
@@ -799,12 +798,103 @@ def aig_rewrite(circuit: Circuit) -> Circuit:
     return circuit
 
 
+def functional_decompose(tt: TruthTable) -> Circuit:
+    """Dependency-aware multi-output synthesis.
+
+    For each output, identifies which variables it actually depends on.
+    If an output depends on <= exact_limit variables, uses exact synthesis
+    on the reduced truth table and embeds the result.
+    """
+    n = tt.n_inputs
+    n_out = tt.n_outputs
+    builder = AIGBuilder(n)
+
+    deps = []
+    for j in range(n_out):
+        d = set()
+        for v in range(n):
+            if tt.depends_on(v, j):
+                d.add(v)
+        deps.append(d)
+
+    order = sorted(range(n_out), key=lambda j: len(deps[j]))
+
+    outputs = [None] * n_out
+    cache = {}
+
+    for j in order:
+        single_tt = TruthTable(n, 1, (tt.table[j],))
+        dep_vars = sorted(deps[j])
+
+        if not dep_vars:
+            outputs[j] = 0
+            continue
+
+        if len(dep_vars) <= 5:
+            reduced_tt = _reduce_to_vars(single_tt, dep_vars)
+            try:
+                from solver import _exact_single_output
+                exact_circ = _exact_single_output(reduced_tt, max_gates=15)
+                if exact_circ is not None:
+                    from benchmark import verify_equivalence as ve
+                    if ve(exact_circ, reduced_tt):
+                        lit = _embed_circuit(exact_circ, dep_vars, builder)
+                        outputs[j] = lit
+                        continue
+            except Exception:
+                pass
+
+        lit = _shannon_rec(single_tt, list(range(n)), builder, cache)
+        outputs[j] = lit
+
+    return builder.build(outputs)
+
+
+def _reduce_to_vars(tt: TruthTable, vars: list[int]) -> TruthTable:
+    n = tt.n_inputs
+    m = len(vars)
+    bits = 0
+    for p in range(1 << m):
+        full_pattern = 0
+        for i, v in enumerate(vars):
+            if (p >> i) & 1:
+                full_pattern |= (1 << v)
+        if (tt.table[0] >> full_pattern) & 1:
+            bits |= (1 << p)
+    return TruthTable(m, 1, (bits,))
+
+
+def _embed_circuit(circ: Circuit, var_map: list[int], builder: AIGBuilder) -> int:
+    remap = {}
+    for i, inp_id in enumerate(circ.inputs):
+        remap[inp_id] = builder.input(var_map[i])
+
+    for node in sorted(circ.nodes.values(), key=lambda n: n.id):
+        if node.type != 'AND':
+            continue
+
+        def remap_lit(lit):
+            nid = abs(lit)
+            mapped = remap.get(nid, nid)
+            return -mapped if lit < 0 else mapped
+
+        new_id = builder.add_and(remap_lit(node.fanin0), remap_lit(node.fanin1))
+        remap[node.id] = new_id
+
+    if circ.outputs:
+        out = circ.outputs[0]
+        nid = abs(out)
+        mapped = remap.get(nid, nid)
+        return -mapped if out < 0 else mapped
+    return 0
+
+
 # ---------------------------------------------------------------------------
 # Main Solver
 # ---------------------------------------------------------------------------
 
 class Solver:
-    def __init__(self, use_exact: bool = True, exact_limit: int = 4):
+    def __init__(self, use_exact: bool = True, exact_limit: int = 5):
         self.use_exact = use_exact
         self.exact_limit = exact_limit
 
@@ -843,6 +933,15 @@ class Solver:
                 c4 = exact_synthesis(tt, max_gates=20)
                 if c4 is not None and verify_equivalence(c4, tt):
                     candidates.append(('exact', c4))
+            except Exception:
+                pass
+
+        # Method 5: Functional decomposition (dependency-aware multi-output)
+        if tt.n_outputs > 1:
+            try:
+                c5 = functional_decompose(tt)
+                if verify_equivalence(c5, tt):
+                    candidates.append(('funcdec', c5))
             except Exception:
                 pass
 
