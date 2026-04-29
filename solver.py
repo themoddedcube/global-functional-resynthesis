@@ -833,7 +833,6 @@ def functional_decompose(tt: TruthTable) -> Circuit:
         if len(dep_vars) <= 5:
             reduced_tt = _reduce_to_vars(single_tt, dep_vars)
             try:
-                from solver import _exact_single_output
                 exact_circ = _exact_single_output(reduced_tt, max_gates=15)
                 if exact_circ is not None:
                     from benchmark import verify_equivalence as ve
@@ -844,10 +843,63 @@ def functional_decompose(tt: TruthTable) -> Circuit:
             except Exception:
                 pass
 
-        lit = _shannon_rec(single_tt, list(range(n)), builder, cache)
-        outputs[j] = lit
+        if len(dep_vars) < n:
+            reduced_tt = _reduce_to_vars(single_tt, dep_vars)
+            lit = _best_order_shannon(reduced_tt, dep_vars, builder)
+            outputs[j] = lit
+        else:
+            lit = _best_order_shannon(single_tt, list(range(n)), builder)
+            outputs[j] = lit
 
     return builder.build(outputs)
+
+
+def _best_order_shannon(tt: TruthTable, orig_vars: list[int],
+                        builder: AIGBuilder) -> int:
+    """Try multiple variable orderings for Shannon decomposition, pick best."""
+    import random
+    n = tt.n_inputs
+    if n <= 6:
+        n_tries = min(100, 1)
+        orderings = [list(range(n))]
+        for _ in range(n_tries):
+            order = list(range(n))
+            random.shuffle(order)
+            orderings.append(order)
+    else:
+        orderings = [list(range(n))]
+        orderings.append(list(reversed(range(n))))
+        # interleaved: 0, n/2, 1, n/2+1, ...
+        half = n // 2
+        interleaved = []
+        for i in range(half):
+            interleaved.append(i)
+            interleaved.append(i + half)
+        if n % 2:
+            interleaved.append(n - 1)
+        orderings.append(interleaved)
+        for _ in range(50):
+            order = list(range(n))
+            random.shuffle(order)
+            orderings.append(order)
+
+    best_lit = None
+    best_gates = float('inf')
+
+    for order in orderings:
+        test_builder = AIGBuilder(len(orig_vars))
+        reordered_vars = list(range(n))
+        cache = {}
+        lit = _shannon_rec(tt, [reordered_vars[i] for i in order], test_builder, cache)
+        test_circ = test_builder.build([lit])
+        gc = test_circ.gate_count()
+        if gc < best_gates:
+            best_gates = gc
+            best_order = order
+
+    cache = {}
+    mapped_vars = [orig_vars[i] for i in best_order]
+    return _shannon_rec(tt, mapped_vars, builder, cache)
 
 
 def _reduce_to_vars(tt: TruthTable, vars: list[int]) -> TruthTable:
@@ -945,10 +997,54 @@ class Solver:
             except Exception:
                 pass
 
+        # Method 6: Iterative improvement with variable order search
+        if tt.n_inputs <= 10:
+            try:
+                from theories.aig_opt import iterative_improvement
+                c6 = iterative_improvement(tt, time_budget=3.0)
+                if c6 is not None and verify_equivalence(c6, tt):
+                    candidates.append(('iterative', c6))
+            except Exception:
+                pass
+
+        # Method 7: ABC-based synthesis (per-output read_truth + optimization)
+        try:
+            from theories.abc_polish import abc_synthesize_multi, abc_synthesize_single
+            if tt.n_outputs == 1:
+                c7 = abc_synthesize_single(tt.table[0], tt.n_inputs, 1)
+                if c7 is not None:
+                    from benchmark import Circuit as C
+                    c7_full = Circuit.new(tt.n_inputs)
+                    from solver import _embed_circuit
+                    builder7 = AIGBuilder(tt.n_inputs)
+                    lit7 = _embed_circuit(c7, list(range(tt.n_inputs)), builder7)
+                    c7_circ = builder7.build([lit7])
+                    if verify_equivalence(c7_circ, tt):
+                        candidates.append(('abc_synth', c7_circ))
+            else:
+                c7 = abc_synthesize_multi(tt)
+                if c7 is not None and verify_equivalence(c7, tt):
+                    candidates.append(('abc_synth', c7))
+        except Exception:
+            pass
+
         if not candidates:
             return shannon_decompose(tt)
 
-        # Pick best by gate count
+        # Polish all candidates with ABC rewriting if available
+        try:
+            from theories.abc_polish import abc_polish
+            polished_candidates = []
+            for name, circ in candidates:
+                try:
+                    p = abc_polish(circ, tt)
+                    polished_candidates.append((name + '+abc', p))
+                except Exception:
+                    pass
+            candidates.extend(polished_candidates)
+        except ImportError:
+            pass
+
         best_name, best_circ = min(candidates, key=lambda x: x[1].gate_count())
         return best_circ
 
