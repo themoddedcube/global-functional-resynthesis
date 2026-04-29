@@ -1208,6 +1208,16 @@ class Solver:
         except Exception:
             pass
 
+        # Method 9: E-graph equality saturation
+        if tt.n_inputs <= 10:
+            try:
+                from theories.egraph import egraph_synthesize
+                c9 = egraph_synthesize(tt, max_iterations=50, max_classes=3000)
+                if c9 is not None and verify_equivalence(c9, tt):
+                    candidates.append(('egraph', c9))
+            except Exception:
+                pass
+
         if not candidates:
             return shannon_decompose(tt)
 
