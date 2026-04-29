@@ -1,0 +1,282 @@
+[
+  {
+    "name": "and3",
+    "abc_gates": 2,
+    "best_script": "resyn2",
+    "all_scripts": {
+      "resyn2": 2,
+      "resyn2rs": 2,
+      "compress2": 2
+    },
+    "baseline_gates": 2,
+    "n_inputs": 3,
+    "n_outputs": 1,
+    "tier": 1
+  },
+  {
+    "name": "or3",
+    "abc_gates": 2,
+    "best_script": "resyn2",
+    "all_scripts": {
+      "resyn2": 2,
+      "resyn2rs": 2,
+      "compress2": 2
+    },
+    "baseline_gates": 20,
+    "n_inputs": 3,
+    "n_outputs": 1,
+    "tier": 1
+  },
+  {
+    "name": "xor3",
+    "abc_gates": 6,
+    "best_script": "resyn2",
+    "all_scripts": {
+      "resyn2": 6,
+      "resyn2rs": 6,
+      "compress2": 6
+    },
+    "baseline_gates": 11,
+    "n_inputs": 3,
+    "n_outputs": 1,
+    "tier": 1
+  },
+  {
+    "name": "mux2",
+    "abc_gates": 3,
+    "best_script": "resyn2",
+    "all_scripts": {
+      "resyn2": 3,
+      "resyn2rs": 3,
+      "compress2": 3
+    },
+    "baseline_gates": 3,
+    "n_inputs": 3,
+    "n_outputs": 1,
+    "tier": 1
+  },
+  {
+    "name": "maj3",
+    "abc_gates": 4,
+    "best_script": "resyn2",
+    "all_scripts": {
+      "resyn2": 4,
+      "resyn2rs": 4,
+      "compress2": 4
+    },
+    "baseline_gates": 5,
+    "n_inputs": 3,
+    "n_outputs": 1,
+    "tier": 1
+  },
+  {
+    "name": "half_adder",
+    "abc_gates": 4,
+    "best_script": "resyn2",
+    "all_scripts": {
+      "resyn2": 4,
+      "resyn2rs": 4,
+      "compress2": 4
+    },
+    "baseline_gates": 4,
+    "n_inputs": 2,
+    "n_outputs": 2,
+    "tier": 1
+  },
+  {
+    "name": "full_adder",
+    "abc_gates": 10,
+    "best_script": "resyn2",
+    "all_scripts": {
+      "resyn2": 10,
+      "resyn2rs": 10,
+      "compress2": 10
+    },
+    "baseline_gates": 9,
+    "n_inputs": 3,
+    "n_outputs": 2,
+    "tier": 1
+  },
+  {
+    "name": "add2",
+    "abc_gates": 15,
+    "best_script": "resyn2",
+    "all_scripts": {
+      "resyn2": 15,
+      "resyn2rs": 15,
+      "compress2": 15
+    },
+    "baseline_gates": 13,
+    "n_inputs": 4,
+    "n_outputs": 3,
+    "tier": 1
+  },
+  {
+    "name": "cmp2",
+    "abc_gates": 5,
+    "best_script": "resyn2",
+    "all_scripts": {
+      "resyn2": 5,
+      "resyn2rs": 5,
+      "compress2": 5
+    },
+    "baseline_gates": 10,
+    "n_inputs": 4,
+    "n_outputs": 1,
+    "tier": 1
+  },
+  {
+    "name": "mul2x1",
+    "abc_gates": 2,
+    "best_script": "resyn2",
+    "all_scripts": {
+      "resyn2": 2,
+      "resyn2rs": 2,
+      "compress2": 2
+    },
+    "baseline_gates": 2,
+    "n_inputs": 3,
+    "n_outputs": 3,
+    "tier": 1
+  },
+  {
+    "name": "add4",
+    "abc_gates": 49,
+    "best_script": "compress2",
+    "all_scripts": {
+      "resyn2": 50,
+      "resyn2rs": 58,
+      "compress2": 49
+    },
+    "baseline_gates": 31,
+    "n_inputs": 8,
+    "n_outputs": 5,
+    "tier": 2
+  },
+  {
+    "name": "mul2x2",
+    "abc_gates": 12,
+    "best_script": "resyn2",
+    "all_scripts": {
+      "resyn2": 12,
+      "resyn2rs": 12,
+      "compress2": 12
+    },
+    "baseline_gates": 12,
+    "n_inputs": 4,
+    "n_outputs": 4,
+    "tier": 2
+  },
+  {
+    "name": "cmp4",
+    "abc_gates": 13,
+    "best_script": "resyn2",
+    "all_scripts": {
+      "resyn2": 13,
+      "resyn2rs": 15,
+      "compress2": 13
+    },
+    "baseline_gates": 22,
+    "n_inputs": 8,
+    "n_outputs": 1,
+    "tier": 2
+  },
+  {
+    "name": "parity8",
+    "abc_gates": 21,
+    "best_script": "resyn2",
+    "all_scripts": {
+      "resyn2": 21,
+      "resyn2rs": 21,
+      "compress2": 21
+    },
+    "baseline_gates": 21,
+    "n_inputs": 8,
+    "n_outputs": 1,
+    "tier": 2
+  },
+  {
+    "name": "decode3to8",
+    "abc_gates": 16,
+    "best_script": "resyn2",
+    "all_scripts": {
+      "resyn2": 16,
+      "resyn2rs": 16,
+      "compress2": 16
+    },
+    "baseline_gates": 16,
+    "n_inputs": 3,
+    "n_outputs": 8,
+    "tier": 2
+  },
+  {
+    "name": "priority4",
+    "abc_gates": 6,
+    "best_script": "resyn2",
+    "all_scripts": {
+      "resyn2": 6,
+      "resyn2rs": 6,
+      "compress2": 6
+    },
+    "baseline_gates": 8,
+    "n_inputs": 4,
+    "n_outputs": 3,
+    "tier": 2
+  },
+  {
+    "name": "mul3x3",
+    "abc_gates": 66,
+    "best_script": "compress2",
+    "all_scripts": {
+      "resyn2": 68,
+      "resyn2rs": 67,
+      "compress2": 66
+    },
+    "baseline_gates": 48,
+    "n_inputs": 6,
+    "n_outputs": 6,
+    "tier": 2
+  },
+  {
+    "name": "add8",
+    "abc_gates": 320,
+    "best_script": "compress2",
+    "all_scripts": {
+      "resyn2": 383,
+      "resyn2rs": 361,
+      "compress2": 320
+    },
+    "baseline_gates": 67,
+    "n_inputs": 16,
+    "n_outputs": 9,
+    "tier": 3
+  },
+  {
+    "name": "mul4x4",
+    "abc_gates": 389,
+    "best_script": "resyn2rs",
+    "all_scripts": {
+      "resyn2": 406,
+      "resyn2rs": 389,
+      "compress2": 398
+    },
+    "baseline_gates": 104,
+    "n_inputs": 8,
+    "n_outputs": 8,
+    "tier": 3
+  },
+  {
+    "name": "cmp8",
+    "abc_gates": 38,
+    "best_script": "compress2",
+    "all_scripts": {
+      "resyn2": 42,
+      "resyn2rs": 43,
+      "compress2": 38
+    },
+    "baseline_gates": 46,
+    "n_inputs": 16,
+    "n_outputs": 1,
+    "tier": 3
+  }
+]
