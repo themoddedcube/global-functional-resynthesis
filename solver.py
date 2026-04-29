@@ -941,6 +941,92 @@ def _embed_circuit(circ: Circuit, var_map: list[int], builder: AIGBuilder) -> in
     return 0
 
 
+def _build_ripple_carry_adder(n_bits: int) -> Circuit:
+    builder = AIGBuilder(2 * n_bits)
+    carry = 0
+    outputs = []
+    for i in range(n_bits):
+        a = builder.input(i)
+        b = builder.input(n_bits + i)
+        ab = builder.add_and(a, b)
+        na_nb = builder.add_and(-a, -b)
+        xor_ab = builder.add_and(-ab, -na_nb)
+        if carry == 0:
+            sum_bit = xor_ab
+            new_carry = ab
+        else:
+            xc = builder.add_and(xor_ab, carry)
+            nxc = builder.add_and(-xor_ab, -carry)
+            sum_bit = builder.add_and(-xc, -nxc)
+            carry_or = builder.add_and(carry, -na_nb)
+            new_carry = -builder.add_and(-ab, -carry_or)
+        outputs.append(sum_bit)
+        carry = new_carry
+    outputs.append(carry)
+    return builder.build(outputs)
+
+
+def _build_array_multiplier(n_bits: int) -> Circuit:
+    builder = AIGBuilder(2 * n_bits)
+    partial_sums = [0] * (2 * n_bits)
+    for i in range(n_bits):
+        carry = 0
+        for j in range(n_bits):
+            pp = builder.add_and(builder.input(i), builder.input(n_bits + j))
+            prev = partial_sums[i + j]
+            if prev == 0 and carry == 0:
+                partial_sums[i + j] = pp
+                continue
+            # Full adder: sum = XOR(pp, prev, carry), carry_out = MAJ(pp, prev, carry)
+            if carry == 0:
+                a, b = pp, prev
+            elif prev == 0:
+                a, b = pp, carry
+            else:
+                # 3-input: need full adder
+                ab = builder.add_and(pp, prev)
+                nab = builder.add_and(-pp, -prev)
+                xor_ab = builder.add_and(-ab, -nab)
+                xc = builder.add_and(xor_ab, carry)
+                nxc = builder.add_and(-xor_ab, -carry)
+                partial_sums[i + j] = builder.add_and(-xc, -nxc)
+                or_ab = -nab
+                carry_or = builder.add_and(carry, or_ab)
+                carry = -builder.add_and(-ab, -carry_or)
+                continue
+            ab = builder.add_and(a, b)
+            nab = builder.add_and(-a, -b)
+            partial_sums[i + j] = builder.add_and(-ab, -nab)
+            carry = ab
+        if carry != 0:
+            partial_sums[i + n_bits] = carry
+    return builder.build(partial_sums[:2 * n_bits])
+
+
+def _try_structural_templates(tt: TruthTable) -> Circuit:
+    """Try known circuit templates and return any that match the truth table."""
+    from benchmark import verify_equivalence
+    n = tt.n_inputs
+    m = tt.n_outputs
+
+    # Try ripple-carry adder: 2k inputs, k+1 outputs
+    if n % 2 == 0 and m == n // 2 + 1:
+        k = n // 2
+        circ = _build_ripple_carry_adder(k)
+        if verify_equivalence(circ, tt):
+            return circ
+
+    # Try array multiplier: 2k inputs, 2k outputs
+    if n % 2 == 0 and m == n:
+        k = n // 2
+        if k >= 2:
+            circ = _build_array_multiplier(k)
+            if verify_equivalence(circ, tt):
+                return circ
+
+    return None
+
+
 # ---------------------------------------------------------------------------
 # Main Solver
 # ---------------------------------------------------------------------------
@@ -1007,7 +1093,16 @@ class Solver:
             except Exception:
                 pass
 
-        # Method 7: ABC-based synthesis (per-output read_truth + optimization)
+        # Method 7: Structural templates (ripple-carry adder, etc.)
+        if tt.n_outputs > 1:
+            try:
+                c_struct = _try_structural_templates(tt)
+                if c_struct is not None and verify_equivalence(c_struct, tt):
+                    candidates.append(('structural', c_struct))
+            except Exception:
+                pass
+
+        # Method 8: ABC-based synthesis (per-output read_truth + optimization)
         try:
             from theories.abc_polish import abc_synthesize_multi, abc_synthesize_single
             if tt.n_outputs == 1:
