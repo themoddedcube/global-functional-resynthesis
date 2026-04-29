@@ -941,6 +941,39 @@ def _embed_circuit(circ: Circuit, var_map: list[int], builder: AIGBuilder) -> in
     return 0
 
 
+def _build_cla_adder(n_bits: int) -> Circuit:
+    builder = AIGBuilder(2 * n_bits)
+    G, P = [], []
+    for i in range(n_bits):
+        a = builder.input(i)
+        b = builder.input(n_bits + i)
+        g = builder.add_and(a, b)
+        nab = builder.add_and(-a, -b)
+        p = builder.add_and(-g, -nab)
+        G.append(g)
+        P.append(p)
+    carries = [0]
+    for i in range(n_bits):
+        c_prev = carries[i]
+        if c_prev == 0:
+            c_next = G[i]
+        else:
+            pc = builder.add_and(P[i], c_prev)
+            c_next = -builder.add_and(-G[i], -pc)
+        carries.append(c_next)
+    outputs = []
+    for i in range(n_bits):
+        p, c = P[i], carries[i]
+        if c == 0:
+            outputs.append(p)
+        else:
+            pc_and = builder.add_and(p, c)
+            pc_nor = builder.add_and(-p, -c)
+            outputs.append(builder.add_and(-pc_and, -pc_nor))
+    outputs.append(carries[n_bits])
+    return builder.build(outputs)
+
+
 def _build_ripple_carry_adder(n_bits: int) -> Circuit:
     builder = AIGBuilder(2 * n_bits)
     carry = 0
@@ -1003,18 +1036,61 @@ def _build_array_multiplier(n_bits: int) -> Circuit:
     return builder.build(partial_sums[:2 * n_bits])
 
 
+def _build_ripple_comparator_gt(n_bits: int) -> Circuit:
+    """Build n-bit greater-than comparator: output 1 iff a > b (MSB-first ripple).
+
+    Input ordering matches benchmark: a[MSB..LSB], b[MSB..LSB]
+    i.e., input indices 0..n-1 are a (MSB at index 0), n..2n-1 are b (MSB at index n).
+    """
+    builder = AIGBuilder(2 * n_bits)
+    result = 0
+    # Process from MSB (index 0) to LSB (index n-1)
+    for i in range(n_bits):
+        a_i = builder.input(i)
+        b_i = builder.input(n_bits + i)
+        gt_i = builder.add_and(a_i, -b_i)
+        lt_i = builder.add_and(-a_i, b_i)
+        eq_i = builder.add_and(-gt_i, -lt_i)
+        if result == 0:
+            result = gt_i
+        else:
+            result = builder.add_or(gt_i, builder.add_and(eq_i, result))
+    return builder.build([result])
+
+
+def _build_ripple_comparator_lt(n_bits: int) -> Circuit:
+    """Build n-bit less-than comparator: output 1 iff a < b."""
+    builder = AIGBuilder(2 * n_bits)
+    result = 0
+    for i in range(n_bits):
+        a_i = builder.input(i)
+        b_i = builder.input(n_bits + i)
+        lt_i = builder.add_and(-a_i, b_i)
+        gt_i = builder.add_and(a_i, -b_i)
+        eq_i = builder.add_and(-lt_i, -gt_i)
+        if result == 0:
+            result = lt_i
+        else:
+            result = builder.add_or(lt_i, builder.add_and(eq_i, result))
+    return builder.build([result])
+
+
 def _try_structural_templates(tt: TruthTable) -> Circuit:
     """Try known circuit templates and return any that match the truth table."""
     from benchmark import verify_equivalence
     n = tt.n_inputs
     m = tt.n_outputs
 
-    # Try ripple-carry adder: 2k inputs, k+1 outputs
+    best = None
+
+    # Try adder templates: 2k inputs, k+1 outputs
     if n % 2 == 0 and m == n // 2 + 1:
         k = n // 2
-        circ = _build_ripple_carry_adder(k)
-        if verify_equivalence(circ, tt):
-            return circ
+        for builder_fn in [_build_cla_adder, _build_ripple_carry_adder]:
+            circ = builder_fn(k)
+            if verify_equivalence(circ, tt):
+                if best is None or circ.gate_count() < best.gate_count():
+                    best = circ
 
     # Try array multiplier: 2k inputs, 2k outputs
     if n % 2 == 0 and m == n:
@@ -1022,9 +1098,19 @@ def _try_structural_templates(tt: TruthTable) -> Circuit:
         if k >= 2:
             circ = _build_array_multiplier(k)
             if verify_equivalence(circ, tt):
-                return circ
+                if best is None or circ.gate_count() < best.gate_count():
+                    best = circ
 
-    return None
+    # Try comparator: 2k inputs, 1 output
+    if n % 2 == 0 and m == 1 and n >= 4:
+        k = n // 2
+        for build_fn in [_build_ripple_comparator_gt, _build_ripple_comparator_lt]:
+            circ = build_fn(k)
+            if verify_equivalence(circ, tt):
+                if best is None or circ.gate_count() < best.gate_count():
+                    best = circ
+
+    return best
 
 
 # ---------------------------------------------------------------------------
@@ -1056,8 +1142,8 @@ class Solver:
         except Exception:
             pass
 
-        # Method 3: SOP synthesis
-        if tt.n_inputs <= 12:
+        # Method 3: SOP synthesis (limited to avoid exponential blowup)
+        if tt.n_inputs <= 8:
             try:
                 c3 = sop_synthesize(tt)
                 if verify_equivalence(c3, tt):
@@ -1093,14 +1179,13 @@ class Solver:
             except Exception:
                 pass
 
-        # Method 7: Structural templates (ripple-carry adder, etc.)
-        if tt.n_outputs > 1:
-            try:
-                c_struct = _try_structural_templates(tt)
-                if c_struct is not None and verify_equivalence(c_struct, tt):
-                    candidates.append(('structural', c_struct))
-            except Exception:
-                pass
+        # Method 7: Structural templates (adder, multiplier, comparator)
+        try:
+            c_struct = _try_structural_templates(tt)
+            if c_struct is not None and verify_equivalence(c_struct, tt):
+                candidates.append(('structural', c_struct))
+        except Exception:
+            pass
 
         # Method 8: ABC-based synthesis (per-output read_truth + optimization)
         try:

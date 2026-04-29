@@ -209,6 +209,8 @@ def abc_optimize(circuit: Circuit, tt: TruthTable,
         'resyn2': 'b; rw; rf; b; rw; rwz; b; rfz; rwz; b',
         'resyn2rs': 'b; rs -K 6; rw; rs -K 6 -N 2; rf; rs -K 8; b; rs -K 8 -N 2; rw; rs -K 10; rwz; rs -K 10 -N 2; b; rs -K 12; rfz; rs -K 12 -N 2; rwz; b',
         'compress2': 'b -l; rw -l; rf -l; b -l; rw -l; rwz -l; b -l; rfz -l; rwz -l; b -l',
+        'dc2': 'b; dc2; b; dc2; rw; rf; b',
+        'heavy': 'st; dch; b; rw; rf; b; rw; rwz; b; rfz; rwz; b; rs -K 6; rw; rs -K 6 -N 2; b',
     }
     abc_script = scripts.get(script, scripts['resyn2'])
 
@@ -249,7 +251,7 @@ def abc_polish(circuit: Circuit, tt: TruthTable, max_rounds: int = 5) -> Circuit
 
     for _ in range(max_rounds):
         improved = False
-        for script in ['resyn2', 'resyn2rs', 'compress2']:
+        for script in ['resyn2', 'resyn2rs', 'compress2', 'dc2', 'heavy']:
             try:
                 result = abc_optimize(best, tt, script)
                 if result is not None and result.gate_count() < best.gate_count():
