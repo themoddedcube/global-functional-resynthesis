@@ -1,0 +1,38 @@
+{
+  "timestamp": "2026-04-29T18:29:14.380208",
+  "git_rev": "3c0150a",
+  "solver_hash": "9b0dcdba",
+  "avg_reduction_ratio": 0.7312348420214987,
+  "total_gates": 328,
+  "total_baseline": 454,
+  "vs_abc_pct": -0.6663275686673449,
+  "all_correct": true,
+  "elapsed_s": 796.8827619552612,
+  "tier_avg": {
+    "1": 0.7242463092463092,
+    "2": 0.7396575198994554,
+    "3": 0.7348770362235645
+  },
+  "per_benchmark": {
+    "and3": 2,
+    "or3": 2,
+    "xor3": 6,
+    "mux2": 3,
+    "maj3": 4,
+    "half_adder": 3,
+    "full_adder": 7,
+    "add2": 10,
+    "cmp2": 5,
+    "mul2x1": 2,
+    "add4": 24,
+    "mul2x2": 8,
+    "cmp4": 13,
+    "parity8": 21,
+    "decode3to8": 12,
+    "priority4": 5,
+    "mul3x3": 37,
+    "add8": 52,
+    "mul4x4": 83,
+    "cmp8": 29
+  }
+}
