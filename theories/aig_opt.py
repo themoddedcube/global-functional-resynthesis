@@ -227,7 +227,7 @@ def iterative_improvement(tt: TruthTable, initial: Circuit = None,
                     continue
                 if len(dep_vars) <= 5:
                     reduced = _reduce_to_vars(TruthTable(n, 1, (tt.table[j],)), dep_vars)
-                    exact = _exact_single_output(reduced, max_gates=15)
+                    exact = _exact_single_output(reduced, max_gates=15, total_timeout=10)
                     if exact is not None:
                         lit = _embed_circuit(exact, dep_vars, builder)
                         outputs.append(lit)

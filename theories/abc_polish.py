@@ -212,6 +212,8 @@ def abc_optimize(circuit: Circuit, tt: TruthTable,
         'compress2': 'b -l; rw -l; rf -l; b -l; rw -l; rwz -l; b -l; rfz -l; rwz -l; b -l',
         'dc2': 'b; dc2; b; dc2; rw; rf; b',
         'dch_resyn': 'st; dch; b; rw; rf; b; rw; rwz; b; rfz; rwz; b',
+        'dch_resyn2rs': 'st; dch; b; rs -K 6; rw; rs -K 6 -N 2; rf; rs -K 8; b; rs -K 8 -N 2; rw; rwz; b; rfz; rwz; b',
+        'dch_compress': 'st; dch; b -l; rw -l; rf -l; b -l; rw -l; rwz -l; b -l; rfz -l; rwz -l; b -l',
     }
     abc_script = scripts.get(script, scripts['resyn2'])
 
@@ -321,21 +323,92 @@ def abc_synthesize_single(tt_bits: int, n_inputs: int, n_outputs: int) -> Option
 
 
 def abc_synthesize_multi(tt: TruthTable) -> Optional[Circuit]:
-    """Synthesize multi-output function by per-output ABC synthesis + shared builder."""
+    """Synthesize multi-output function via PLA + ABC optimization."""
     if not os.path.exists(ABC_PATH):
         return None
 
-    from solver import AIGBuilder, _embed_circuit
+    best = None
+    best_gates = float('inf')
 
+    # Strategy 1: PLA-based multi-output synthesis (ABC optimizes across outputs)
+    pla_result = _abc_pla_synthesize(tt)
+    if pla_result is not None:
+        gc = pla_result.gate_count()
+        if gc < best_gates and verify_equivalence(pla_result, tt):
+            best = pla_result
+            best_gates = gc
+
+    # Strategy 2: Per-output ABC synthesis with shared builder
+    from solver import AIGBuilder, _embed_circuit
     builder = AIGBuilder(tt.n_inputs)
     outputs = []
-
+    ok = True
     for j in range(tt.n_outputs):
         sub = abc_synthesize_single(tt.table[j], tt.n_inputs, 1)
         if sub is not None:
             lit = _embed_circuit(sub, list(range(tt.n_inputs)), builder)
             outputs.append(lit)
         else:
-            return None
+            ok = False
+            break
+    if ok:
+        per_output = builder.build(outputs)
+        gc = per_output.gate_count()
+        if gc < best_gates and verify_equivalence(per_output, tt):
+            best = per_output
+            best_gates = gc
 
-    return builder.build(outputs)
+    return best
+
+
+def _abc_pla_synthesize(tt: TruthTable) -> Optional[Circuit]:
+    """Synthesize multi-output function using PLA format for ABC."""
+    if not os.path.exists(ABC_PATH):
+        return None
+
+    n = tt.n_inputs
+    m = tt.n_outputs
+    if n > 12:
+        return None
+    size = 1 << n
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        pla_file = os.path.join(tmpdir, 'input.pla')
+        output_file = os.path.join(tmpdir, 'output.aig')
+
+        with open(pla_file, 'w') as f:
+            f.write(f".i {n}\n.o {m}\n.p {size}\n")
+            for p in range(size):
+                input_bits = ''.join(str((p >> v) & 1) for v in range(n))
+                output_bits = ''.join(str((tt.table[j] >> p) & 1) for j in range(m))
+                f.write(f"{input_bits} {output_bits}\n")
+            f.write(".e\n")
+
+        scripts = [
+            'collapse; strash; b; rw; rf; b; rw; rwz; b; rfz; rwz; b',
+            'collapse; strash; st; dch; b; rw; rf; b; rw; rwz; b; rfz; rwz; b',
+            'collapse; strash; b; rs -K 6; rw; rs -K 6 -N 2; rf; rs -K 8; b; rw; rwz; b; rfz; rwz; b',
+        ]
+
+        best = None
+        best_gates = float('inf')
+
+        for script in scripts:
+            try:
+                abc_cmd = f"source -s {ABC_RC}; read_pla {pla_file}; {script}; write_aiger {output_file}"
+                result = subprocess.run(
+                    [ABC_PATH, '-c', abc_cmd],
+                    capture_output=True, text=True, timeout=30,
+                    cwd=os.path.dirname(ABC_RC)
+                )
+                if os.path.exists(output_file):
+                    circ = read_aiger(output_file, n)
+                    if circ and circ.gate_count() < best_gates:
+                        if verify_equivalence(circ, tt):
+                            best = circ
+                            best_gates = circ.gate_count()
+                    os.remove(output_file)
+            except Exception:
+                pass
+
+        return best

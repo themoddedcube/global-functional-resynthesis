@@ -429,31 +429,16 @@ def _covers(impl: tuple, n: int) -> set:
 # ---------------------------------------------------------------------------
 
 def exact_synthesis(tt: TruthTable, max_gates: Optional[int] = None) -> Optional[Circuit]:
-    """Find minimum-gate AIG using SAT-based exact synthesis.
-
-    Only practical for n_inputs <= 5 and n_outputs == 1.
-    For multi-output, synthesize each output independently.
-    """
+    """Find minimum-gate AIG using SAT-based exact synthesis."""
     if tt.n_outputs > 1:
-        builder = AIGBuilder(tt.n_inputs)
-        outputs = []
-        for j in range(tt.n_outputs):
-            single_tt = TruthTable(tt.n_inputs, 1, (tt.table[j],))
-            single_circ = exact_synthesis(single_tt, max_gates)
-            if single_circ is None:
-                return None
-            # Merge into builder - need to extract the logic
-            # For simplicity, build each output independently
-            outputs.append(None)
-
-        # Simpler approach: build each output as independent circuit, merge
         return _exact_multi_output(tt, max_gates)
+    return _exact_single_output(tt, max_gates, total_timeout=60)
 
-    return _exact_single_output(tt, max_gates)
 
-
-def _exact_single_output(tt: TruthTable, max_gates: Optional[int] = None) -> Optional[Circuit]:
+def _exact_single_output(tt: TruthTable, max_gates: Optional[int] = None,
+                         total_timeout: Optional[float] = None) -> Optional[Circuit]:
     """Exact synthesis for single-output function."""
+    import time as _time
     n = tt.n_inputs
     t = tt.table[0]
     size = 1 << n
@@ -468,7 +453,6 @@ def _exact_single_output(tt: TruthTable, max_gates: Optional[int] = None) -> Opt
         c.set_outputs([-n0])
         return c
 
-    # Check if function is a single literal
     for v in range(n):
         pos_mask = 0
         for i in range(size):
@@ -483,24 +467,30 @@ def _exact_single_output(tt: TruthTable, max_gates: Optional[int] = None) -> Opt
             c.set_outputs([-(v + 1)])
             return c
 
-    # Binary search on gate count
     if max_gates is None:
         max_gates = min(20, size)
 
+    if total_timeout is None:
+        total_timeout = 60 if n >= 6 else 300
+
+    global_start = _time.time()
     for num_gates in range(1, max_gates + 1):
-        result = _try_exact(tt, num_gates)
+        remaining = total_timeout - (_time.time() - global_start)
+        if remaining <= 0:
+            return None
+        result = _try_exact(tt, num_gates, per_timeout=min(remaining, 10 if n >= 6 else 30))
         if result is not None:
             return result
 
     return None
 
 
-def _try_exact(tt: TruthTable, num_gates: int) -> Optional[Circuit]:
+def _try_exact(tt: TruthTable, num_gates: int, per_timeout: float = 30) -> Optional[Circuit]:
     """Try to synthesize with exactly num_gates AND gates using SAT."""
+    import time as _time
     n = tt.n_inputs
     t = tt.table[0]
 
-    # Use CEGIS: start with subset of patterns, add counterexamples
     import random
     size = 1 << n
 
@@ -509,16 +499,17 @@ def _try_exact(tt: TruthTable, num_gates: int) -> Optional[Circuit]:
     else:
         patterns = random.sample(range(size), min(32, size))
 
-    num_nodes = n + num_gates  # inputs + gates
-    # Node IDs: 0..n-1 are inputs, n..n+num_gates-1 are gates
+    start = _time.time()
 
     while True:
+        if _time.time() - start > per_timeout:
+            return None
+
         result = _sat_solve(tt, num_gates, patterns)
         if result is None:
-            return None  # UNSAT with these constraints = need more gates
+            return None
 
         circuit = result
-        # Verify against full truth table
         for p in range(size):
             expected = (t >> p) & 1
             got = (circuit.simulate(p) >> 0) & 1
@@ -526,7 +517,7 @@ def _try_exact(tt: TruthTable, num_gates: int) -> Optional[Circuit]:
                 patterns.append(p)
                 break
         else:
-            return circuit  # All patterns match
+            return circuit
 
 
 def _sat_solve(tt: TruthTable, num_gates: int, patterns: list[int]) -> Optional[Circuit]:
@@ -729,9 +720,10 @@ def _exact_multi_output(tt: TruthTable, max_gates: Optional[int] = None) -> Opti
     """Exact synthesis for multi-output by synthesizing each output independently."""
     builder = AIGBuilder(tt.n_inputs)
     outputs = []
+    per_timeout = 15 if tt.n_inputs >= 6 else 60
     for j in range(tt.n_outputs):
         single_tt = TruthTable(tt.n_inputs, 1, (tt.table[j],))
-        circ = _exact_single_output(single_tt, max_gates)
+        circ = _exact_single_output(single_tt, max_gates, total_timeout=per_timeout)
         if circ is None:
             return None
 
@@ -833,7 +825,7 @@ def functional_decompose(tt: TruthTable) -> Circuit:
         if len(dep_vars) <= 5:
             reduced_tt = _reduce_to_vars(single_tt, dep_vars)
             try:
-                exact_circ = _exact_single_output(reduced_tt, max_gates=15)
+                exact_circ = _exact_single_output(reduced_tt, max_gates=15, total_timeout=30)
                 if exact_circ is not None:
                     from benchmark import verify_equivalence as ve
                     if ve(exact_circ, reduced_tt):
@@ -869,7 +861,6 @@ def _best_order_shannon(tt: TruthTable, orig_vars: list[int],
     else:
         orderings = [list(range(n))]
         orderings.append(list(reversed(range(n))))
-        # interleaved: 0, n/2, 1, n/2+1, ...
         half = n // 2
         interleaved = []
         for i in range(half):
@@ -878,7 +869,8 @@ def _best_order_shannon(tt: TruthTable, orig_vars: list[int],
         if n % 2:
             interleaved.append(n - 1)
         orderings.append(interleaved)
-        for _ in range(50):
+        n_random = 10 if n > 10 else 50
+        for _ in range(n_random):
             order = list(range(n))
             random.shuffle(order)
             orderings.append(order)
@@ -1036,24 +1028,350 @@ def _build_array_multiplier(n_bits: int) -> Circuit:
     return builder.build(partial_sums[:2 * n_bits])
 
 
-def _build_ripple_comparator_gt(n_bits: int) -> Circuit:
-    """Build n-bit greater-than comparator: output 1 iff a > b (MSB-first ripple).
+def _shared_exact_multi(tt: TruthTable) -> Optional[Circuit]:
+    """Multi-output exact synthesis with shared gates via a single AIGBuilder."""
+    n = tt.n_inputs
+    builder = AIGBuilder(n)
+    outputs = []
 
-    Input ordering matches benchmark: a[MSB..LSB], b[MSB..LSB]
-    i.e., input indices 0..n-1 are a (MSB at index 0), n..2n-1 are b (MSB at index n).
-    """
+    # Group outputs by their dependency sets
+    output_info = []
+    for j in range(tt.n_outputs):
+        dep_vars = sorted(v for v in range(n) if tt.depends_on(v, j))
+        output_info.append((j, dep_vars, tt.table[j]))
+
+    # Sort by complexity (fewer dependencies first) to maximize sharing
+    output_info.sort(key=lambda x: len(x[1]))
+
+    cache = {}
+    all_outputs = [None] * tt.n_outputs
+
+    for j, dep_vars, table_bits in output_info:
+        if not dep_vars:
+            all_outputs[j] = 0
+            continue
+
+        if len(dep_vars) <= 5:
+            reduced_tt = _reduce_to_vars(TruthTable(n, 1, (table_bits,)), dep_vars)
+            exact_circ = _exact_single_output(reduced_tt, max_gates=15, total_timeout=30)
+            if exact_circ is not None:
+                from benchmark import verify_equivalence as ve
+                if ve(exact_circ, reduced_tt):
+                    lit = _embed_circuit(exact_circ, dep_vars, builder)
+                    all_outputs[j] = lit
+                    continue
+
+        # Fallback: Shannon with the shared builder
+        single_tt = TruthTable(n, 1, (table_bits,))
+        lit = _shannon_rec(single_tt, list(range(n)), builder, cache)
+        all_outputs[j] = lit
+
+    if any(o is None for o in all_outputs):
+        return None
+
+    return builder.build(all_outputs)
+
+
+def _build_prefix_adder(n_bits: int) -> Circuit:
+    """Brent-Kung style parallel prefix adder. Fewer gates than ripple for n >= 4."""
+    builder = AIGBuilder(2 * n_bits)
+
+    # Generate and propagate for each bit
+    G = []  # generate: a AND b
+    P = []  # propagate: a XOR b (= -AND(-AND(a,-b), -AND(-a,b)) ... but we use the AIG version)
+    for i in range(n_bits):
+        a = builder.input(i)
+        b = builder.input(n_bits + i)
+        g = builder.add_and(a, b)
+        nab = builder.add_and(-a, -b)
+        p = builder.add_and(-g, -nab)  # XOR via AIG
+        G.append(g)
+        P.append(p)
+
+    # Parallel prefix tree (Brent-Kung)
+    # prefix_G[i] = carry into bit i+1
+    # (G_combined, P_combined) = prefix operator applied pairwise
+    # Operator: (G_hi, P_hi) o (G_lo, P_lo) = (G_hi OR (P_hi AND G_lo), P_hi AND P_lo)
+    levels_G = [list(G)]
+    levels_P = [list(P)]
+
+    # Up-sweep: combine pairs at increasing distances
+    stride = 1
+    while stride < n_bits:
+        prev_G = levels_G[-1]
+        prev_P = levels_P[-1]
+        new_G = list(prev_G)
+        new_P = list(prev_P)
+        for i in range(stride * 2 - 1, n_bits, stride * 2):
+            j = i - stride
+            # (new_G[i], new_P[i]) = (prev_G[i], prev_P[i]) o (prev_G[j], prev_P[j])
+            pg = builder.add_and(prev_P[i], prev_G[j])
+            new_G[i] = builder.add_or(prev_G[i], pg)
+            new_P[i] = builder.add_and(prev_P[i], prev_P[j])
+        levels_G.append(new_G)
+        levels_P.append(new_P)
+        stride *= 2
+
+    # Down-sweep: fill in remaining prefix sums
+    cur_G = levels_G[-1]
+    cur_P = levels_P[-1]
+    stride = stride // 4
+    while stride >= 1:
+        new_G = list(cur_G)
+        new_P = list(cur_P)
+        for i in range(stride * 3 - 1, n_bits, stride * 2):
+            j = i - stride
+            if j >= 0:
+                pg = builder.add_and(cur_P[i], cur_G[j])
+                new_G[i] = builder.add_or(cur_G[i], pg)
+                new_P[i] = builder.add_and(cur_P[i], cur_P[j])
+        cur_G = new_G
+        cur_P = new_P
+        stride //= 2
+
+    # Sum bits: s[i] = P[i] XOR carry[i], where carry[0]=0, carry[i+1]=cur_G[i]
+    outputs = []
+    for i in range(n_bits):
+        if i == 0:
+            outputs.append(P[i])
+        else:
+            carry = cur_G[i - 1]
+            xor_pc = builder.add_and(P[i], carry)
+            nxor_pc = builder.add_and(-P[i], -carry)
+            outputs.append(builder.add_and(-xor_pc, -nxor_pc))
+    outputs.append(cur_G[n_bits - 1])
+    return builder.build(outputs)
+
+
+def _aig_half_adder(builder, a, b):
+    """Returns (sum, carry) in AIG."""
+    ab = builder.add_and(a, b)
+    nab = builder.add_and(-a, -b)
+    s = builder.add_and(-ab, -nab)  # XOR
+    return s, ab
+
+def _aig_full_adder(builder, a, b, cin):
+    """Returns (sum, carry) in AIG."""
+    ab = builder.add_and(a, b)
+    nab = builder.add_and(-a, -b)
+    xor_ab = builder.add_and(-ab, -nab)
+
+    xc = builder.add_and(xor_ab, cin)
+    nxc = builder.add_and(-xor_ab, -cin)
+    s = builder.add_and(-xc, -nxc)  # XOR(XOR(a,b), cin)
+
+    # carry = (a AND b) OR (XOR(a,b) AND cin)
+    carry = builder.add_or(ab, xc)
+    return s, carry
+
+
+def _build_wallace_tree_multiplier(n_bits: int) -> Circuit:
+    """Wallace tree multiplier: reduce partial products with 3-2 counters."""
+    builder = AIGBuilder(2 * n_bits)
+    n_out = 2 * n_bits
+
+    # Generate partial products
+    columns = [[] for _ in range(n_out)]
+    for i in range(n_bits):
+        for j in range(n_bits):
+            pp = builder.add_and(builder.input(i), builder.input(n_bits + j))
+            columns[i + j].append(pp)
+
+    # Wallace tree reduction: repeatedly reduce columns until each has <= 2 entries
+    while max(len(col) for col in columns) > 2:
+        new_columns = [[] for _ in range(n_out)]
+        for c in range(n_out):
+            col = columns[c]
+            i = 0
+            while i + 2 < len(col):
+                s, carry = _aig_full_adder(builder, col[i], col[i+1], col[i+2])
+                new_columns[c].append(s)
+                if c + 1 < n_out:
+                    new_columns[c + 1].append(carry)
+                i += 3
+            while i < len(col):
+                new_columns[c].append(col[i])
+                i += 1
+        columns = new_columns
+
+    # Final addition: each column has at most 2 entries
+    carry = 0
+    outputs = []
+    for c in range(n_out):
+        col = columns[c]
+        if carry != 0:
+            col = col + [carry]
+
+        if len(col) == 0:
+            outputs.append(0)
+            carry = 0
+        elif len(col) == 1:
+            outputs.append(col[0])
+            carry = 0
+        elif len(col) == 2:
+            s, carry = _aig_half_adder(builder, col[0], col[1])
+            outputs.append(s)
+        else:  # 3
+            s, carry = _aig_full_adder(builder, col[0], col[1], col[2])
+            outputs.append(s)
+
+    return builder.build(outputs)
+
+
+def _build_dadda_tree_multiplier(n_bits: int) -> Circuit:
+    """Dadda tree multiplier: minimizes half adders compared to Wallace tree."""
+    builder = AIGBuilder(2 * n_bits)
+    n_out = 2 * n_bits
+
+    columns = [[] for _ in range(n_out)]
+    for i in range(n_bits):
+        for j in range(n_bits):
+            pp = builder.add_and(builder.input(i), builder.input(n_bits + j))
+            columns[i + j].append(pp)
+
+    max_height = max(len(col) for col in columns)
+    targets = [2]
+    while targets[-1] < max_height:
+        targets.append(int(targets[-1] * 3 / 2))
+    targets.reverse()
+
+    for target in targets:
+        if max(len(col) for col in columns) <= target:
+            continue
+        new_columns = [[] for _ in range(n_out)]
+        for c in range(n_out):
+            col = columns[c]
+            i = 0
+            while len(col) - i + len(new_columns[c]) > target:
+                if len(col) - i >= 3:
+                    s, carry = _aig_full_adder(builder, col[i], col[i+1], col[i+2])
+                    new_columns[c].append(s)
+                    if c + 1 < n_out:
+                        new_columns[c + 1].append(carry)
+                    i += 3
+                elif len(col) - i == 2 and len(col) - i + len(new_columns[c]) > target:
+                    s, carry = _aig_half_adder(builder, col[i], col[i+1])
+                    new_columns[c].append(s)
+                    if c + 1 < n_out:
+                        new_columns[c + 1].append(carry)
+                    i += 2
+                else:
+                    break
+            while i < len(col):
+                new_columns[c].append(col[i])
+                i += 1
+        columns = new_columns
+
+    carry = 0
+    outputs = []
+    for c in range(n_out):
+        col = columns[c]
+        if carry != 0:
+            col = col + [carry]
+        if len(col) == 0:
+            outputs.append(0)
+            carry = 0
+        elif len(col) == 1:
+            outputs.append(col[0])
+            carry = 0
+        elif len(col) == 2:
+            s, carry = _aig_half_adder(builder, col[0], col[1])
+            outputs.append(s)
+        else:
+            s, carry = _aig_full_adder(builder, col[0], col[1], col[2])
+            outputs.append(s)
+    return builder.build(outputs)
+
+
+def _build_wallace_cla_multiplier(n_bits: int) -> Circuit:
+    """Wallace tree with CLA final adder instead of ripple carry."""
+    builder = AIGBuilder(2 * n_bits)
+    n_out = 2 * n_bits
+
+    columns = [[] for _ in range(n_out)]
+    for i in range(n_bits):
+        for j in range(n_bits):
+            pp = builder.add_and(builder.input(i), builder.input(n_bits + j))
+            columns[i + j].append(pp)
+
+    while max(len(col) for col in columns) > 2:
+        new_columns = [[] for _ in range(n_out)]
+        for c in range(n_out):
+            col = columns[c]
+            i = 0
+            while i + 2 < len(col):
+                s, carry = _aig_full_adder(builder, col[i], col[i+1], col[i+2])
+                new_columns[c].append(s)
+                if c + 1 < n_out:
+                    new_columns[c + 1].append(carry)
+                i += 3
+            while i < len(col):
+                new_columns[c].append(col[i])
+                i += 1
+        columns = new_columns
+
+    # Extract two rows for CLA addition
+    row_a = []
+    row_b = []
+    for c in range(n_out):
+        col = columns[c]
+        row_a.append(col[0] if len(col) > 0 else 0)
+        row_b.append(col[1] if len(col) > 1 else 0)
+
+    # CLA final addition
+    G, P = [], []
+    for c in range(n_out):
+        a, b = row_a[c], row_b[c]
+        if a == 0 and b == 0:
+            G.append(0)
+            P.append(0)
+        elif a == 0 or b == 0:
+            G.append(0)
+            P.append(a if b == 0 else b)
+        else:
+            g = builder.add_and(a, b)
+            nab = builder.add_and(-a, -b)
+            p = builder.add_and(-g, -nab)
+            G.append(g)
+            P.append(p)
+
+    carries = [0]
+    for c in range(n_out):
+        c_prev = carries[c]
+        if c_prev == 0:
+            c_next = G[c]
+        elif G[c] == 0 and P[c] == 0:
+            c_next = 0
+        else:
+            pc = builder.add_and(P[c], c_prev)
+            c_next = builder.add_or(G[c], pc)
+        carries.append(c_next)
+
+    outputs = []
+    for c in range(n_out):
+        p, cin = P[c], carries[c]
+        if cin == 0:
+            outputs.append(p)
+        elif p == 0:
+            outputs.append(cin)
+        else:
+            outputs.append(builder.add_xor(p, cin))
+    return builder.build(outputs)
+
+
+def _build_ripple_comparator_gt(n_bits: int) -> Circuit:
+    """Build n-bit greater-than comparator: output 1 iff a > b (MSB-first ripple)."""
     builder = AIGBuilder(2 * n_bits)
     result = 0
-    # Process from MSB (index 0) to LSB (index n-1)
     for i in range(n_bits):
         a_i = builder.input(i)
         b_i = builder.input(n_bits + i)
         gt_i = builder.add_and(a_i, -b_i)
-        lt_i = builder.add_and(-a_i, b_i)
-        eq_i = builder.add_and(-gt_i, -lt_i)
         if result == 0:
             result = gt_i
         else:
+            lt_i = builder.add_and(-a_i, b_i)
+            eq_i = builder.add_and(-gt_i, -lt_i)
             result = builder.add_or(gt_i, builder.add_and(eq_i, result))
     return builder.build([result])
 
@@ -1066,11 +1384,11 @@ def _build_ripple_comparator_lt(n_bits: int) -> Circuit:
         a_i = builder.input(i)
         b_i = builder.input(n_bits + i)
         lt_i = builder.add_and(-a_i, b_i)
-        gt_i = builder.add_and(a_i, -b_i)
-        eq_i = builder.add_and(-lt_i, -gt_i)
         if result == 0:
             result = lt_i
         else:
+            gt_i = builder.add_and(a_i, -b_i)
+            eq_i = builder.add_and(-lt_i, -gt_i)
             result = builder.add_or(lt_i, builder.add_and(eq_i, result))
     return builder.build([result])
 
@@ -1092,14 +1410,16 @@ def _try_structural_templates(tt: TruthTable) -> Circuit:
                 if best is None or circ.gate_count() < best.gate_count():
                     best = circ
 
-    # Try array multiplier: 2k inputs, 2k outputs
+    # Try multiplier templates: 2k inputs, 2k outputs
     if n % 2 == 0 and m == n:
         k = n // 2
         if k >= 2:
-            circ = _build_array_multiplier(k)
-            if verify_equivalence(circ, tt):
-                if best is None or circ.gate_count() < best.gate_count():
-                    best = circ
+            for builder_fn in [_build_array_multiplier, _build_wallace_tree_multiplier,
+                               _build_dadda_tree_multiplier, _build_wallace_cla_multiplier]:
+                circ = builder_fn(k)
+                if verify_equivalence(circ, tt):
+                    if best is None or circ.gate_count() < best.gate_count():
+                        best = circ
 
     # Try comparator: 2k inputs, 1 output
     if n % 2 == 0 and m == 1 and n >= 4:
@@ -1154,14 +1474,15 @@ class Solver:
         # Method 4: Exact synthesis (for small functions)
         if self.use_exact and tt.n_inputs <= self.exact_limit:
             try:
-                c4 = exact_synthesis(tt, max_gates=20)
+                gate_limit = 15 if tt.n_inputs <= 5 else 12
+                c4 = exact_synthesis(tt, max_gates=gate_limit)
                 if c4 is not None and verify_equivalence(c4, tt):
                     candidates.append(('exact', c4))
             except Exception:
                 pass
 
         # Method 5: Functional decomposition (dependency-aware multi-output)
-        if tt.n_outputs > 1:
+        if tt.n_outputs > 1 and tt.n_inputs <= 10:
             try:
                 c5 = functional_decompose(tt)
                 if verify_equivalence(c5, tt):
@@ -1193,20 +1514,26 @@ class Solver:
             if tt.n_outputs == 1:
                 c7 = abc_synthesize_single(tt.table[0], tt.n_inputs, 1)
                 if c7 is not None:
-                    from benchmark import Circuit as C
-                    c7_full = Circuit.new(tt.n_inputs)
-                    from solver import _embed_circuit
                     builder7 = AIGBuilder(tt.n_inputs)
                     lit7 = _embed_circuit(c7, list(range(tt.n_inputs)), builder7)
                     c7_circ = builder7.build([lit7])
                     if verify_equivalence(c7_circ, tt):
                         candidates.append(('abc_synth', c7_circ))
-            else:
+            elif tt.n_inputs <= 12:
                 c7 = abc_synthesize_multi(tt)
                 if c7 is not None and verify_equivalence(c7, tt):
                     candidates.append(('abc_synth', c7))
         except Exception:
             pass
+
+        # Method 9a: Multi-output shared exact synthesis
+        if tt.n_outputs > 1 and tt.n_inputs <= 5:
+            try:
+                c9a = _shared_exact_multi(tt)
+                if c9a is not None and verify_equivalence(c9a, tt):
+                    candidates.append(('shared_exact', c9a))
+            except Exception:
+                pass
 
         # Method 9: E-graph equality saturation
         if tt.n_inputs <= 10:
@@ -1221,13 +1548,15 @@ class Solver:
         if not candidates:
             return shannon_decompose(tt)
 
-        # Polish all candidates with ABC rewriting if available
+        # Polish top candidates with ABC rewriting
         try:
             from theories.abc_polish import abc_polish
+            candidates.sort(key=lambda x: x[1].gate_count())
+            top_n = min(3, len(candidates))
             polished_candidates = []
-            for name, circ in candidates:
+            for name, circ in candidates[:top_n]:
                 try:
-                    p = abc_polish(circ, tt)
+                    p = abc_polish(circ, tt, max_rounds=3)
                     polished_candidates.append((name + '+abc', p))
                 except Exception:
                     pass
