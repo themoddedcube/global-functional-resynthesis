@@ -1,6 +1,6 @@
 # Global Functional Resynthesis: Multi-Strategy Circuit Optimization Beyond Local Rewriting
 
-**Arun Rajendra** and **Chaithu Talasila**
+**Chaithu Talasila** (themoddedcube@gmail.com)
 
 ---
 
