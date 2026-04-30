@@ -790,6 +790,532 @@ def aig_rewrite(circuit: Circuit) -> Circuit:
     return circuit
 
 
+# ---------------------------------------------------------------------------
+# Cut-based AIG Rewriting
+# ---------------------------------------------------------------------------
+
+# Lazily populated cache: 4-input truth table -> (optimal_gate_count, Circuit or None)
+_opt4_cache: dict[int, tuple[int, Optional[Circuit]]] = {}
+_opt4_built = False
+
+
+def _get_optimal_4input(tt_bits: int) -> tuple[int, Optional[Circuit]]:
+    """Get optimal gate count for a 4-input single-output truth table.
+
+    Uses lazy caching: computes on first request, then caches.
+    For the 65536 possible 4-input functions, optimal AIG gate counts range
+    from 0 (constants) to ~7.
+    """
+    global _opt4_cache
+    if tt_bits in _opt4_cache:
+        return _opt4_cache[tt_bits]
+
+    # Handle trivial cases first
+    n = 4
+    size = 1 << n  # 16
+    all_ones = (1 << size) - 1
+
+    if tt_bits == 0:
+        _opt4_cache[tt_bits] = (0, None)
+        return (0, None)
+    if tt_bits == all_ones:
+        _opt4_cache[tt_bits] = (0, None)
+        return (0, None)
+
+    # Check if it's a single variable or its complement
+    for v in range(n):
+        pos_mask = 0
+        for i in range(size):
+            if (i >> v) & 1:
+                pos_mask |= (1 << i)
+        if tt_bits == pos_mask:
+            _opt4_cache[tt_bits] = (0, None)
+            return (0, None)
+        if tt_bits == all_ones ^ pos_mask:
+            _opt4_cache[tt_bits] = (0, None)
+            return (0, None)
+
+    # Try exact synthesis with increasing gate counts
+    tt = TruthTable(n, 1, (tt_bits,))
+    circ = _exact_single_output(tt, max_gates=7, total_timeout=5)
+    if circ is not None:
+        gc = circ.gate_count()
+        _opt4_cache[tt_bits] = (gc, circ)
+        return (gc, circ)
+
+    # Fallback: couldn't find optimal, return high estimate
+    _opt4_cache[tt_bits] = (8, None)
+    return (8, None)
+
+
+def _enumerate_cuts(circuit: Circuit, node_id: int, max_cut_size: int = 4) -> list[frozenset[int]]:
+    """Enumerate cuts for a node in the AIG.
+
+    A cut of node v is a set of nodes C such that every path from a primary
+    input to v passes through at least one node in C. The trivial cut is {v}
+    itself. We enumerate non-trivial cuts up to max_cut_size by combining
+    cuts of fanin children.
+
+    Returns a list of cuts, where each cut is a frozenset of node IDs.
+    Only returns cuts consisting of INPUT or AND nodes (not CONST0).
+    """
+    node = circuit.nodes[node_id]
+    if node.type in ('INPUT', 'CONST0'):
+        return [frozenset([node_id])]
+
+    # For AND nodes, enumerate cuts by combining fanin cuts
+    # The cut of an AND node can be:
+    #   1. {node_id} (trivial cut)
+    #   2. Any combination of one cut from each fanin, merged
+    fanin0_id = abs(node.fanin0)
+    fanin1_id = abs(node.fanin1)
+
+    # Get cuts for fanins (recursively, but cached)
+    cuts0 = _enumerate_cuts_cached(circuit, fanin0_id, max_cut_size, {})
+    cuts1 = _enumerate_cuts_cached(circuit, fanin1_id, max_cut_size, {})
+
+    result_set = set()
+    result_set.add(frozenset([node_id]))
+
+    # Merge cuts from both fanins
+    for c0 in cuts0:
+        for c1 in cuts1:
+            merged = c0 | c1
+            if len(merged) <= max_cut_size:
+                result_set.add(merged)
+
+    return list(result_set)
+
+
+def _enumerate_cuts_cached(circuit: Circuit, node_id: int, max_cut_size: int,
+                           cache: dict) -> list[frozenset[int]]:
+    """Cached version of cut enumeration to avoid exponential blowup."""
+    if node_id in cache:
+        return cache[node_id]
+
+    node = circuit.nodes[node_id]
+    if node.type in ('INPUT', 'CONST0'):
+        result = [frozenset([node_id])]
+        cache[node_id] = result
+        return result
+
+    fanin0_id = abs(node.fanin0)
+    fanin1_id = abs(node.fanin1)
+
+    cuts0 = _enumerate_cuts_cached(circuit, fanin0_id, max_cut_size, cache)
+    cuts1 = _enumerate_cuts_cached(circuit, fanin1_id, max_cut_size, cache)
+
+    result_set = set()
+    result_set.add(frozenset([node_id]))
+
+    # Limit combinatorial explosion: cap number of cuts per fanin
+    limit = 20
+    c0_list = cuts0[:limit]
+    c1_list = cuts1[:limit]
+
+    for c0 in c0_list:
+        for c1 in c1_list:
+            merged = c0 | c1
+            if len(merged) <= max_cut_size:
+                result_set.add(merged)
+
+    result = list(result_set)
+    # Keep only the best cuts (smallest ones, up to a limit)
+    result.sort(key=len)
+    result = result[:30]
+    cache[node_id] = result
+    return result
+
+
+def _compute_cone_truth_table(circuit: Circuit, root_id: int, root_inv: bool,
+                              cut: frozenset[int]) -> tuple[int, list[int]]:
+    """Compute the truth table of the cone from cut leaves to root.
+
+    Args:
+        circuit: The AIG circuit
+        root_id: The root node of the cone (positive ID)
+        root_inv: Whether the root literal is inverted
+        cut: Set of node IDs forming the cut (leaves of the cone)
+
+    Returns:
+        (tt_bits, cut_list) where tt_bits is the truth table as an int,
+        and cut_list is the ordered list of cut node IDs (input order).
+    """
+    cut_list = sorted(cut)
+    n_cut = len(cut_list)
+    cut_idx = {nid: i for i, nid in enumerate(cut_list)}
+    n_patterns = 1 << n_cut
+
+    tt_bits = 0
+    for pattern in range(n_patterns):
+        # Assign values to cut nodes based on pattern
+        values = {}
+        for i, nid in enumerate(cut_list):
+            values[nid] = (pattern >> i) & 1
+
+        # Evaluate cone from cut to root
+        val = _eval_cone(circuit, root_id, cut, values)
+        if root_inv:
+            val = 1 - val
+
+        if val:
+            tt_bits |= (1 << pattern)
+
+    return tt_bits, cut_list
+
+
+def _eval_cone(circuit: Circuit, node_id: int, cut: frozenset[int],
+               values: dict[int, int]) -> int:
+    """Evaluate a node within a cone, using cut values as leaves."""
+    if node_id in values:
+        return values[node_id]
+
+    node = circuit.nodes[node_id]
+    if node.type == 'CONST0':
+        values[node_id] = 0
+        return 0
+    if node.type == 'INPUT':
+        # Should not reach here if cut is correct - but handle gracefully
+        values[node_id] = 0
+        return 0
+
+    # AND node
+    f0_id = abs(node.fanin0)
+    f0_inv = node.fanin0 < 0
+    f1_id = abs(node.fanin1)
+    f1_inv = node.fanin1 < 0
+
+    v0 = _eval_cone(circuit, f0_id, cut, values)
+    if f0_inv:
+        v0 = 1 - v0
+    v1 = _eval_cone(circuit, f1_id, cut, values)
+    if f1_inv:
+        v1 = 1 - v1
+
+    val = v0 & v1
+    values[node_id] = val
+    return val
+
+
+def _count_cone_gates(circuit: Circuit, root_id: int, cut: frozenset[int]) -> int:
+    """Count the number of AND gates in the cone from cut to root (exclusive of cut nodes)."""
+    visited = set()
+    count = [0]
+
+    def _walk(nid):
+        if nid in visited or nid in cut:
+            return
+        visited.add(nid)
+        node = circuit.nodes[nid]
+        if node.type == 'AND':
+            count[0] += 1
+            _walk(abs(node.fanin0))
+            _walk(abs(node.fanin1))
+
+    _walk(root_id)
+    return count[0]
+
+
+def aig_cut_rewrite(circuit: Circuit, tt: TruthTable) -> Circuit:
+    """Cut-based AIG rewriting pass.
+
+    For each AND node in the circuit, enumerates cuts of size <= 4.
+    For each cut, computes the truth table of the cone and checks if
+    a more compact AIG implementation exists. If so, rebuilds the
+    circuit with the replacement.
+
+    Args:
+        circuit: The input AIG circuit
+        tt: The expected truth table (for verification)
+
+    Returns:
+        An improved circuit (or the original if no improvement found)
+    """
+    from benchmark import verify_equivalence
+    import time
+
+    n = tt.n_inputs
+    if n > 16:
+        return circuit
+
+    start_time = time.time()
+    time_limit = 30.0  # seconds
+
+    best_circuit = circuit
+    best_gates = circuit.gate_count()
+    improved = True
+
+    while improved:
+        improved = False
+        if time.time() - start_time > time_limit:
+            break
+
+        current = best_circuit
+        # Sort AND nodes in topological order (by ID, since IDs are assigned in order)
+        and_nodes = sorted(
+            [n for n in current.nodes.values() if n.type == 'AND'],
+            key=lambda n: n.id
+        )
+
+        # Build cut cache once per iteration
+        cut_cache: dict[int, list[frozenset[int]]] = {}
+
+        for node in and_nodes:
+            if time.time() - start_time > time_limit:
+                break
+
+            # Enumerate cuts for this node
+            cuts = _enumerate_cuts_cached(current, node.id, 4, cut_cache)
+
+            for cut in cuts:
+                # Skip trivial cuts (single node = the node itself)
+                if len(cut) <= 1:
+                    continue
+
+                # All cut nodes must be valid (inputs or earlier AND nodes)
+                valid_cut = True
+                for nid in cut:
+                    if nid not in current.nodes:
+                        valid_cut = False
+                        break
+                if not valid_cut:
+                    continue
+
+                # Count gates in the cone
+                cone_gates = _count_cone_gates(current, node.id, cut)
+                if cone_gates <= 1:
+                    continue  # Can't improve a single gate
+
+                # Compute truth table of the cone
+                n_cut = len(cut)
+                cone_tt_bits, cut_list = _compute_cone_truth_table(
+                    current, node.id, False, cut
+                )
+
+                # Also check the inverted version
+                all_ones = (1 << (1 << n_cut)) - 1
+                inv_tt_bits = cone_tt_bits ^ all_ones
+
+                # Check if we can build it with fewer gates
+                best_opt_gates = cone_gates
+                best_opt_circ = None
+                best_opt_inv = False
+
+                for check_bits, is_inv in [(cone_tt_bits, False), (inv_tt_bits, True)]:
+                    # Check trivial cases: constant or single variable
+                    if check_bits == 0:
+                        if cone_gates > 0:
+                            best_opt_gates = 0
+                            best_opt_circ = None
+                            best_opt_inv = is_inv
+                        continue
+                    if check_bits == all_ones:
+                        if cone_gates > 0:
+                            best_opt_gates = 0
+                            best_opt_circ = None
+                            best_opt_inv = is_inv
+                        continue
+
+                    is_var = False
+                    for v in range(n_cut):
+                        pos_mask = 0
+                        for i in range(1 << n_cut):
+                            if (i >> v) & 1:
+                                pos_mask |= (1 << i)
+                        if check_bits == pos_mask or check_bits == all_ones ^ pos_mask:
+                            if cone_gates > 0:
+                                best_opt_gates = 0
+                                best_opt_circ = None
+                                best_opt_inv = is_inv if check_bits == pos_mask else not is_inv
+                            is_var = True
+                            break
+                    if is_var:
+                        continue
+
+                    # For functions with few inputs, try to find optimal
+                    if n_cut <= 4:
+                        opt_gc, opt_circ = _get_optimal_4input(check_bits)
+                        if opt_gc < cone_gates:
+                            if opt_circ is not None and opt_gc < best_opt_gates:
+                                best_opt_gates = opt_gc
+                                best_opt_circ = opt_circ
+                                best_opt_inv = is_inv
+                            elif opt_gc < best_opt_gates:
+                                # Try to synthesize
+                                check_tt = TruthTable(n_cut, 1, (check_bits,))
+                                synth = _exact_single_output(check_tt, max_gates=cone_gates - 1, total_timeout=2)
+                                if synth is not None:
+                                    best_opt_gates = synth.gate_count()
+                                    best_opt_circ = synth
+                                    best_opt_inv = is_inv
+
+                if best_opt_gates >= cone_gates:
+                    continue  # No improvement
+
+                # We found a better implementation! Rebuild the circuit.
+                new_circ = _rebuild_with_replacement(
+                    current, node.id, cut_list, best_opt_circ, best_opt_inv
+                )
+
+                if new_circ is not None and new_circ.gate_count() < best_gates:
+                    if verify_equivalence(new_circ, tt):
+                        best_circuit = new_circ
+                        best_gates = new_circ.gate_count()
+                        improved = True
+                        break  # Restart scan from the beginning
+
+            if improved:
+                break  # Break outer loop to restart
+
+    return best_circuit
+
+
+def _rebuild_with_replacement(circuit: Circuit, cone_root: int,
+                              cut_list: list[int], replacement: Optional[Circuit],
+                              invert_output: bool) -> Optional[Circuit]:
+    """Rebuild a circuit, replacing the cone rooted at cone_root with replacement.
+
+    The replacement circuit's inputs correspond to cut_list nodes in the
+    original circuit.
+
+    Args:
+        circuit: Original circuit
+        cone_root: Node ID of the cone root to replace
+        cut_list: Ordered list of node IDs forming the cut (leaves)
+        replacement: The replacement circuit (None = constant 0 or variable)
+        invert_output: Whether to invert the replacement output
+
+    Returns:
+        New circuit with the replacement, or None on failure
+    """
+    n = len(circuit.inputs)
+    builder = AIGBuilder(n)
+
+    # Map from old node IDs to new literals
+    remap: dict[int, int] = {}
+    remap[0] = 0  # CONST0
+
+    for inp_id in circuit.inputs:
+        remap[inp_id] = builder.input(circuit.inputs.index(inp_id))
+
+    # Find which nodes are inside the cone (to skip them)
+    cone_nodes = set()
+    _collect_cone_nodes(circuit, cone_root, frozenset(cut_list), cone_nodes)
+
+    # Determine the replacement literal
+    def _get_replacement_lit() -> int:
+        if replacement is None:
+            # Constant or variable - need to determine which
+            # Check all trivial cases
+            return 0  # Default to constant 0
+
+        # Embed the replacement circuit using cut_list as input mapping
+        rep_remap: dict[int, int] = {}
+        for i, inp_id in enumerate(replacement.inputs):
+            if i < len(cut_list):
+                rep_remap[inp_id] = remap.get(cut_list[i], cut_list[i])
+            else:
+                rep_remap[inp_id] = 0
+
+        for rep_node in sorted(replacement.nodes.values(), key=lambda nd: nd.id):
+            if rep_node.type != 'AND':
+                continue
+            f0 = rep_node.fanin0
+            f1 = rep_node.fanin1
+            f0_id = abs(f0)
+            f1_id = abs(f1)
+            lit0 = rep_remap.get(f0_id, 0)
+            if f0 < 0:
+                lit0 = -lit0
+            lit1 = rep_remap.get(f1_id, 0)
+            if f1 < 0:
+                lit1 = -lit1
+            new_id = builder.add_and(lit0, lit1)
+            rep_remap[rep_node.id] = new_id
+
+        if replacement.outputs:
+            out = replacement.outputs[0]
+            out_id = abs(out)
+            lit = rep_remap.get(out_id, 0)
+            if out < 0:
+                lit = -lit
+            return lit
+        return 0
+
+    # Process nodes in topological order
+    sorted_nodes = sorted(
+        [nd for nd in circuit.nodes.values() if nd.type == 'AND'],
+        key=lambda nd: nd.id
+    )
+
+    for nd in sorted_nodes:
+        if nd.id == cone_root:
+            # Replace this node with the replacement
+            rep_lit = _get_replacement_lit()
+            if invert_output:
+                rep_lit = -rep_lit
+            remap[nd.id] = rep_lit
+            continue
+
+        if nd.id in cone_nodes and nd.id != cone_root:
+            # This node is inside the cone but not the root - skip it
+            # It will be dead code (unreferenced)
+            # But we still need to build it in case other nodes reference it
+            # Actually, we should check if it's referenced outside the cone
+            pass
+
+        # Regular node - rebuild using remapped fanins
+        f0 = nd.fanin0
+        f1 = nd.fanin1
+        f0_id = abs(f0)
+        f1_id = abs(f1)
+
+        # If a fanin is the cone root, use replacement
+        if f0_id in remap:
+            lit0 = remap[f0_id]
+        else:
+            lit0 = f0_id  # Shouldn't happen in a well-formed circuit
+        if f0 < 0:
+            lit0 = -lit0
+
+        if f1_id in remap:
+            lit1 = remap[f1_id]
+        else:
+            lit1 = f1_id
+        if f1 < 0:
+            lit1 = -lit1
+
+        new_id = builder.add_and(lit0, lit1)
+        remap[nd.id] = new_id
+
+    # Remap outputs
+    new_outputs = []
+    for out in circuit.outputs:
+        out_id = abs(out)
+        if out_id in remap:
+            lit = remap[out_id]
+        else:
+            lit = 0
+        if out < 0:
+            lit = -lit
+        new_outputs.append(lit)
+
+    return builder.build(new_outputs)
+
+
+def _collect_cone_nodes(circuit: Circuit, root_id: int, cut: frozenset[int],
+                        result: set[int]):
+    """Collect all node IDs in the cone from cut to root (exclusive of cut nodes)."""
+    if root_id in result or root_id in cut:
+        return
+    node = circuit.nodes.get(root_id)
+    if node is None or node.type != 'AND':
+        return
+    result.add(root_id)
+    _collect_cone_nodes(circuit, abs(node.fanin0), cut, result)
+    _collect_cone_nodes(circuit, abs(node.fanin1), cut, result)
+
+
 def functional_decompose(tt: TruthTable) -> Circuit:
     """Dependency-aware multi-output synthesis.
 
@@ -1565,6 +2091,17 @@ class Solver:
             pass
 
         best_name, best_circ = min(candidates, key=lambda x: x[1].gate_count())
+
+        # Post-processing: cut-based AIG rewriting on the best circuit
+        if tt.n_inputs <= 16:
+            try:
+                rewritten = aig_cut_rewrite(best_circ, tt)
+                if (rewritten.gate_count() < best_circ.gate_count()
+                        and verify_equivalence(rewritten, tt)):
+                    best_circ = rewritten
+            except Exception:
+                pass
+
         return best_circ
 
 
@@ -1578,6 +2115,11 @@ def solve(tt: TruthTable) -> Circuit:
 
 
 if __name__ == '__main__':
-    benchmarks = load_benchmarks()
-    results = run_evaluation(solve, benchmarks)
-    print_results(results)
+    import sys
+    if len(sys.argv) > 1:
+        from cli import main
+        main()
+    else:
+        benchmarks = load_benchmarks()
+        results = run_evaluation(solve, benchmarks)
+        print_results(results)
